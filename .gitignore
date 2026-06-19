@@ -1,0 +1,59 @@
+# 环境与密钥
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+.venv/
+venv/
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# 向量数据库
+chroma_db/
+
+# 用户上传文件
+data/*
+!data/.gitkeep
+uploads/
+
+# 数据库文件
+*.db
+*.sqlite3
+
+# 日志
+*.log
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 构建产物
+dist/
+build/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 项目文档（个人/临时）
+AI-chat.txt
+login.txt
+REFACTOR-PLAN.md
+简历项目描述.md
