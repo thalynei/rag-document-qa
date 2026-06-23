@@ -2,9 +2,10 @@ import logging
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI
 
-from config import DIRECT_CHAT_PROMPT, LLM_MODEL, OPENAI_API_BASE, OPENAI_API_KEY, QA_PROMPT, TEMPERATURE
+from config import DIRECT_CHAT_PROMPT, QA_PROMPT, TEMPERATURE
+
+from .llm_factory import create_llm
 
 logger = logging.getLogger(__name__)
 
@@ -20,18 +21,13 @@ def format_docs(docs) -> str:
     return "\n\n".join(doc.page_content for doc in docs)
 
 
-def summarize_document(docs) -> str:
+def summarize_document(docs, model_name: str | None = None) -> str:
     """使用 LLM 生成文档摘要（取前 3000 字符）"""
     content = "\n\n".join(doc.page_content for doc in docs)[:3000]
     if not content.strip():
         return "（文档内容为空）"
 
-    llm = ChatOpenAI(
-        model=LLM_MODEL,
-        temperature=0.3,
-        openai_api_key=OPENAI_API_KEY,
-        openai_api_base=OPENAI_API_BASE,
-    )
+    llm = create_llm(model_name=model_name, temperature=0.3, streaming=False)
     prompt = PromptTemplate(template=SUMMARY_PROMPT, input_variables=["content"])
     chain = prompt | llm | StrOutputParser()
 
@@ -44,15 +40,9 @@ def summarize_document(docs) -> str:
         return "（摘要生成失败）"
 
 
-def create_qa_chain(retriever):
+def create_qa_chain(retriever, model_name: str | None = None):
     """创建 RAG 问答链（LCEL）"""
-    llm = ChatOpenAI(
-        model=LLM_MODEL,
-        temperature=TEMPERATURE,
-        openai_api_key=OPENAI_API_KEY,
-        openai_api_base=OPENAI_API_BASE,
-        streaming=True,
-    )
+    llm = create_llm(model_name=model_name, temperature=TEMPERATURE, streaming=True)
 
     prompt = PromptTemplate(
         template=QA_PROMPT,
@@ -66,6 +56,10 @@ def create_qa_chain(retriever):
         question = input_dict["question"]
         chat_history = input_dict.get("chat_history", "")
         source_docs = retriever.invoke(question)
+        if source_docs:
+            logger.info(f"检索到 {len(source_docs)} 个相关文档块")
+        else:
+            logger.warning("未检索到相关文档块")
         return question, chat_history, source_docs
 
     def invoke(input_dict: dict) -> dict:
@@ -106,15 +100,9 @@ def create_qa_chain(retriever):
     return ChainWithSources()
 
 
-def create_direct_chain():
+def create_direct_chain(model_name: str | None = None):
     """创建直接对话链（无 RAG 检索）"""
-    llm = ChatOpenAI(
-        model=LLM_MODEL,
-        temperature=TEMPERATURE,
-        openai_api_key=OPENAI_API_KEY,
-        openai_api_base=OPENAI_API_BASE,
-        streaming=True,
-    )
+    llm = create_llm(model_name=model_name, temperature=TEMPERATURE, streaming=True)
 
     prompt = PromptTemplate(
         template=DIRECT_CHAT_PROMPT,

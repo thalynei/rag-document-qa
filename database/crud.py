@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from .models import Conversation, Document, Message, User
+from .models import Conversation, Document, Message, User, UserSettings
 
 
 # ─── User ────────────────────────────────────────────────────────────────────
@@ -29,6 +29,24 @@ def get_user_by_username(db: Session, username: str) -> Optional[User]:
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
+
+
+def update_user_avatar(db: Session, user_id: int, avatar_path: str) -> Optional[User]:
+    user = get_user_by_id(db, user_id)
+    if user:
+        user.avatar_path = avatar_path
+        db.commit()
+        db.refresh(user)
+    return user
+
+
+def update_user_password(db: Session, user_id: int, hashed_password: str) -> Optional[User]:
+    user = get_user_by_id(db, user_id)
+    if user:
+        user.hashed_password = hashed_password
+        db.commit()
+        db.refresh(user)
+    return user
 
 
 # ─── Conversation ────────────────────────────────────────────────────────────
@@ -84,6 +102,7 @@ def create_message(
     role: str,
     content: str,
     sources: Optional[list[dict]] = None,
+    model_name: Optional[str] = None,
 ) -> Message:
     sources_json = json.dumps(sources, ensure_ascii=False) if sources else None
     msg = Message(
@@ -91,6 +110,7 @@ def create_message(
         role=role,
         content=content,
         sources=sources_json,
+        model_name=model_name,
     )
     db.add(msg)
 
@@ -115,14 +135,33 @@ def get_messages(db: Session, conversation_id: int) -> list[Message]:
 
 
 def get_recent_messages(db: Session, conversation_id: int, limit: int = 10) -> list[Message]:
-    """Get recent messages for chat history context."""
-    return (
+    """Get recent messages for chat history context (oldest first for LLM context)."""
+    subquery = (
         db.query(Message)
         .filter(Message.conversation_id == conversation_id)
         .order_by(desc(Message.created_at))
         .limit(limit)
+        .subquery()
+    )
+    return (
+        db.query(Message)
+        .join(subquery, Message.id == subquery.c.id)
+        .order_by(Message.created_at)
         .all()
     )
+
+
+def delete_message(db: Session, message_id: int, conversation_id: int) -> bool:
+    """删除单条消息"""
+    msg = db.query(Message).filter(
+        Message.id == message_id,
+        Message.conversation_id == conversation_id,
+    ).first()
+    if msg:
+        db.delete(msg)
+        db.commit()
+        return True
+    return False
 
 
 # ─── Document ────────────────────────────────────────────────────────────────
@@ -171,3 +210,23 @@ def delete_document(db: Session, doc_id: str, user_id: int) -> bool:
         db.commit()
         return True
     return False
+
+
+# ─── UserSettings ────────────────────────────────────────────────────────────
+
+def get_or_create_user_settings(db: Session, user_id: int) -> UserSettings:
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
+    if not settings:
+        settings = UserSettings(user_id=user_id)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+def update_system_prompt(db: Session, user_id: int, system_prompt: str) -> UserSettings:
+    settings = get_or_create_user_settings(db, user_id)
+    settings.system_prompt = system_prompt
+    db.commit()
+    db.refresh(settings)
+    return settings

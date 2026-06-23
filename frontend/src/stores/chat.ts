@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import type { Message, DocumentItem, ChatHistoryItem, UploadingDocument } from '../types'
-import { uploadDocument, checkStatus, clearDocument, deleteDocument, streamChat, checkUploadStatus } from '../services/api'
+import type { Message, DocumentItem, ChatHistoryItem, UploadingDocument, ModelInfo } from '../types'
+import { uploadDocument, checkStatus, clearDocument, deleteDocument, streamChat, checkUploadStatus, fetchModels, deleteMessage as apiDeleteMessage } from '../services/api'
 import { useToastStore } from './toast'
 import { useConversationStore } from './conversation'
 
@@ -16,7 +16,29 @@ export const useChatStore = defineStore('chat', () => {
   const pollingTimers = new Map<string, ReturnType<typeof setInterval>>()
   const toast = useToastStore()
 
+  // 模型选择状态
+  const selectedModel = ref<string>(localStorage.getItem('rag-qa-model') || '')
+  const availableModels = ref<ModelInfo[]>([])
+
   const hasDocuments = computed(() => documents.value.length > 0)
+
+  async function loadModels() {
+    try {
+      availableModels.value = await fetchModels()
+      // 如果没有选中模型或选中模型不在列表中，使用第一个
+      if (availableModels.value.length > 0) {
+        const exists = availableModels.value.some(m => m.id === selectedModel.value)
+        if (!exists && !selectedModel.value) {
+          selectedModel.value = availableModels.value[0].id
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  function setSelectedModel(modelId: string) {
+    selectedModel.value = modelId
+    localStorage.setItem('rag-qa-model', modelId)
+  }
 
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
@@ -176,23 +198,28 @@ export const useChatStore = defineStore('chat', () => {
       await streamChat(
         question,
         chatHistory,
-        (token) => {
-          messages.value[assistantIdx].content += token
-        },
-        (sources) => {
-          messages.value[assistantIdx].sources = sources
-          messages.value[assistantIdx].isStreaming = false
-          isStreaming.value = false
+        {
+          onToken: (token) => {
+            messages.value[assistantIdx].content += token
+          },
+          onDone: (sources, evaluation, modelName) => {
+            messages.value[assistantIdx].sources = sources
+            messages.value[assistantIdx].evaluation = evaluation
+            messages.value[assistantIdx].model_name = modelName
+            messages.value[assistantIdx].isStreaming = false
+            isStreaming.value = false
 
-          // 更新对话列表
-          convStore.fetchConversations()
-        },
-        (error) => {
-          messages.value[assistantIdx].content = `生成回答时出错: ${error}`
-          messages.value[assistantIdx].isStreaming = false
-          isStreaming.value = false
+            // 更新对话列表
+            convStore.fetchConversations()
+          },
+          onError: (error) => {
+            messages.value[assistantIdx].content = `生成回答时出错: ${error}`
+            messages.value[assistantIdx].isStreaming = false
+            isStreaming.value = false
+          },
         },
         convStore.currentConversation?.id,
+        selectedModel.value || undefined,
       )
     } catch {
       messages.value[assistantIdx].content = '生成回答时出错: 网络连接失败'
@@ -201,7 +228,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  function regenerateMessage(index: number) {
+  async function regenerateMessage(index: number) {
     if (isStreaming.value) return
     const msg = messages.value[index]
     if (!msg || msg.role !== 'assistant') return
@@ -214,7 +241,27 @@ export const useChatStore = defineStore('chat', () => {
 
     const userQuestion = messages.value[userMsgIdx].content
     messages.value.splice(userMsgIdx, 2)
-    sendMessage(userQuestion)
+    await sendMessage(userQuestion)
+  }
+
+  async function deleteMessage(index: number) {
+    const msg = messages.value[index]
+    if (!msg) return
+
+    // 从本地移除
+    messages.value.splice(index, 1)
+
+    // 如果有关联的对话，从服务器也删除
+    const convStore = useConversationStore()
+    if (convStore.currentConversation && msg.id) {
+      try {
+        // 尝试用数字 ID 删除（数据库消息 ID）
+        const numId = parseInt(msg.id, 10)
+        if (!isNaN(numId)) {
+          await apiDeleteMessage(convStore.currentConversation.id, numId)
+        }
+      } catch { /* 忽略服务器错误，本地已删除 */ }
+    }
   }
 
   function exportConversation() {
@@ -239,6 +286,10 @@ export const useChatStore = defineStore('chat', () => {
     documents,
     uploadingDocs,
     hasDocuments,
+    selectedModel,
+    availableModels,
+    loadModels,
+    setSelectedModel,
     upload,
     status,
     removeDocument,
@@ -246,6 +297,7 @@ export const useChatStore = defineStore('chat', () => {
     clearMessages,
     sendMessage,
     regenerateMessage,
+    deleteMessage,
     exportConversation,
   }
 })

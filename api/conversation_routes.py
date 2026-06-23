@@ -14,6 +14,7 @@ from database.crud import (
     create_conversation,
     create_message,
     delete_conversation,
+    delete_message,
     get_conversation,
     get_conversations,
     get_messages,
@@ -100,4 +101,20 @@ async def delete_conv(
     """Delete a conversation."""
     if not delete_conversation(db, conv_id, user.id):
         raise HTTPException(404, "对话不存在")
+    return {"status": "deleted"}
+
+
+@router.delete("/{conv_id}/messages/{message_id}")
+async def delete_message_endpoint(
+    conv_id: int,
+    message_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """删除单条消息"""
+    conv = get_conversation(db, conv_id, user.id)
+    if not conv:
+        raise HTTPException(404, "对话不存在")
+    if not delete_message(db, message_id, conv_id):
+        raise HTTPException(404, "消息不存在")
     return {"status": "deleted"}

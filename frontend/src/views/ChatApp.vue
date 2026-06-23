@@ -4,7 +4,6 @@ import { Menu, MessageSquare } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useThemeStore } from '../stores/theme'
 import { useConversationStore } from '../stores/conversation'
-import { useAuthStore } from '../stores/auth'
 import Sidebar from '../components/Sidebar.vue'
 import ChatView from '../components/ChatView.vue'
 import ToastNotification from '../components/ToastNotification.vue'
@@ -12,7 +11,6 @@ import ToastNotification from '../components/ToastNotification.vue'
 const chatStore = useChatStore()
 const themeStore = useThemeStore()
 const convStore = useConversationStore()
-const authStore = useAuthStore()
 const sidebarOpen = ref(false)
 
 onMounted(async () => {

@@ -63,7 +63,8 @@ class SessionData:
     """会话级别的数据（任务、临时文件）- 仅当前会话有效"""
     session_id: str
     tasks: dict[str, ProcessingTask] = field(default_factory=dict)
-    temp_files: dict[str, TempFileContent] = field(default_factory=dict)
+    # temp_files 按 conversation_id 隔离: {conv_id: {temp_id: TempFileContent}}
+    temp_files: dict[int, dict[str, TempFileContent]] = field(default_factory=dict)
 
 
 class UserStore:

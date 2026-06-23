@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick, watch, computed } from 'vue'
-import { Eraser, Sparkles, MessageSquare } from 'lucide-vue-next'
+import { Eraser, MessageSquare } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useConversationStore } from '../stores/conversation'
 import { useToastStore } from '../stores/toast'
@@ -50,8 +50,8 @@ async function onUpload(file: File) {
     }
     store.messages.push(uploadingMsg)
 
-    // 使用临时上传 API
-    const result = await uploadTempFile(file)
+    // 使用临时上传 API（传入当前对话 ID 以隔离临时文件）
+    const result = await uploadTempFile(file, convStore.currentConversation?.id)
 
     // 移除上传中的消息
     const idx = store.messages.findIndex(m => m.id === uploadingMsg.id)

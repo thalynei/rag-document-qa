@@ -12,6 +12,15 @@ class ChatRequest(BaseModel):
     question: str
     chat_history: list[ChatMessage] = []
     conversation_id: Optional[int] = None
+    model: Optional[str] = None  # 可选：指定使用的模型
+
+
+class ModelInfo(BaseModel):
+    id: str
+    display_name: str
+    provider: str
+    max_tokens: int = 8192
+    description: str = ""
 
 
 class DocumentItem(BaseModel):

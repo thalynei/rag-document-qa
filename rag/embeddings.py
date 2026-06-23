@@ -9,6 +9,11 @@ from config import CHROMA_PERSIST_DIR, EMBEDDING_API_BASE, EMBEDDING_API_KEY, EM
 logger = logging.getLogger(__name__)
 
 
+def get_user_collection_name(user_id: int) -> str:
+    """生成用户专属的 ChromaDB 集合名，实现知识库按用户隔离"""
+    return f"rag_docs_user_{user_id}"
+
+
 def get_embeddings() -> OpenAIEmbeddings:
     """初始化 OpenAI Embeddings"""
     return OpenAIEmbeddings(

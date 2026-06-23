@@ -22,17 +22,20 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    avatar_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     # Relationships
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     documents: Mapped[list["Document"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    settings: Mapped[Optional["UserSettings"]] = relationship(back_populates="user", uselist=False)
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "username": self.username,
             "email": self.email,
+            "avatar_url": f"/uploads/avatars/{self.avatar_path}" if self.avatar_path else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -72,6 +75,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # "user" or "assistant"
     content: Mapped[str] = mapped_column(Text, nullable=False)
     sources: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
+    model_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     # Relationships
@@ -91,6 +95,7 @@ class Message(Base):
             "role": self.role,
             "content": self.content,
             "sources": sources,
+            "model_name": self.model_name,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -126,3 +131,16 @@ class Document(Base):
             "doc_id": self.doc_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    # Relationships
+    user: Mapped["User"] = relationship(back_populates="settings")

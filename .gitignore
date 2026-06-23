@@ -1,7 +1,6 @@
 # 环境与密钥
 .env
 .env.*
-!.env.example
 
 # Python
 __pycache__/
@@ -28,11 +27,9 @@ chroma_db/
 # 用户上传文件
 data/*
 !data/.gitkeep
-uploads/
 
-# 数据库文件
-*.db
-*.sqlite3
+# 上传文件（头像等）
+uploads/
 
 # 日志
 *.log
@@ -52,8 +49,13 @@ build/
 frontend/node_modules/
 frontend/dist/
 
-# 项目文档（个人/临时）
-AI-chat.txt
-login.txt
+# 开发文档
 REFACTOR-PLAN.md
 简历项目描述.md
+CLAUDE.md
+AI-chat.txt
+login.txt
+
+# Markdown（忽略非项目文档）
+*.md
+!README.md

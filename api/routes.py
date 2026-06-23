@@ -19,7 +19,8 @@ from database.crud import create_document, create_message, delete_document, get_
 from rag.loader import load_pdf
 from rag.chain import create_direct_chain, create_qa_chain, summarize_document
 from rag.embeddings import add_documents_to_vectorstore, create_vectorstore, delete_documents_by_filter, load_vectorstore
-from rag.loader import load_pdf
+from rag.evaluation import format_evaluation_for_sse
+from rag.llm_factory import get_available_models
 from rag.retriever import get_retriever
 from rag.splitter import split_documents
 
@@ -29,6 +30,7 @@ from .models import (
     ChatRequest,
     ClearResponse,
     DocumentItem,
+    ModelInfo,
     StatusResponse,
     UploadResponse,
     UploadStatusResponse,
@@ -44,6 +46,12 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
 # Strong references to background tasks to prevent GC (BUG #5 fix)
 _background_tasks: set[asyncio.Task] = set()
+
+
+@router.get("/models")
+async def list_models() -> list[dict]:
+    """返回可用的 LLM 模型列表"""
+    return get_available_models()
 
 
 def _format_chat_history_from_db(messages, max_turns: int = 5) -> str:
@@ -108,13 +116,17 @@ async def upload_temp_file(
     request: Request,
     response: Response,
     file: UploadFile = File(...),
+    conversation_id: int | None = None,
     user=Depends(get_current_user),
 ):
-    """临时文件上传（仅解析内容，不向量化存储）"""
+    """临时文件上传（仅解析内容，不向量化存储，按对话隔离）"""
     session_id = request.cookies.get("session_id")
     session, is_new = store.get_or_create(session_id)
     if is_new:
         response.set_cookie("session_id", session.session_id, httponly=True)
+
+    # 使用 conversation_id 隔离，无则用 0 作为默认桶
+    conv_key = conversation_id or 0
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
@@ -134,14 +146,16 @@ async def upload_temp_file(
         docs = await asyncio.to_thread(load_pdf, tmp_path, file.filename or "unknown")
         file_content = "\n\n".join(doc.page_content for doc in docs)
 
-        # 存储到 session 的临时文件中
+        # 存储到指定对话的临时文件中（按 conversation_id 隔离）
         temp_id = str(uuid4())
-        session.temp_files[temp_id] = TempFileContent(
+        if conv_key not in session.temp_files:
+            session.temp_files[conv_key] = {}
+        session.temp_files[conv_key][temp_id] = TempFileContent(
             filename=file.filename or "unknown",
             content=file_content[:50000],  # 限制最大 50000 字符
         )
 
-        logger.info(f"临时文件已解析: {file.filename}, {len(file_content)} 字符")
+        logger.info(f"临时文件已解析: {file.filename}, 对话ID={conv_key}, {len(file_content)} 字符")
 
         return {
             "temp_id": temp_id,
@@ -169,14 +183,19 @@ async def get_temp_file_content(
     session_id = request.cookies.get("session_id")
     session = store.get(session_id)
 
-    if not session or temp_id not in session.temp_files:
+    if not session:
         raise HTTPException(404, detail="临时文件不存在")
 
-    temp_file = session.temp_files[temp_id]
-    return {
-        "filename": temp_file.filename,
-        "content": temp_file.content,
-    }
+    # 在所有对话的临时文件中查找
+    for conv_temps in session.temp_files.values():
+        if temp_id in conv_temps:
+            temp_file = conv_temps[temp_id]
+            return {
+                "filename": temp_file.filename,
+                "content": temp_file.content,
+            }
+
+    raise HTTPException(404, detail="临时文件不存在")
 
 
 async def _process_document(session_id: str, task_id: str, file_path: str, filename: str, user_id: Optional[int] = None, doc_id: Optional[str] = None, owner_user_id: Optional[int] = None):
@@ -194,6 +213,7 @@ async def _process_document(session_id: str, task_id: str, file_path: str, filen
     user_data = None
     if owner_user_id:
         user_data, _ = user_store.get_or_create(owner_user_id)
+        logger.info(f"文档处理开始: {filename}, 用户ID={owner_user_id}, user_data={user_data is not None}")
 
     try:
         task.status = "processing"
@@ -218,17 +238,31 @@ async def _process_document(session_id: str, task_id: str, file_path: str, filen
         task.progress = "embedding"
         embeddings = get_cached_embeddings()
 
-        # 使用用户级别的向量库（所有对话共享）
+        # 使用用户级别的向量库（按用户 ID 隔离的集合）
         if user_data:
+            from rag.embeddings import get_user_collection_name
+            collection_name = get_user_collection_name(owner_user_id)
+
             async with user_data.upload_lock:
+                # 先尝试加载已有向量库（服务器重启后恢复）
                 if user_data.vectorstore is None:
+                    existing_vs = await asyncio.to_thread(load_vectorstore, embeddings, collection_name)
+                    if existing_vs:
+                        user_data.vectorstore = existing_vs
+                        logger.info(f"已从磁盘恢复用户 {owner_user_id} 的向量库")
+
+                if user_data.vectorstore is None:
+                    # 向量库不存在，创建新的（使用用户专属集合名）
                     user_data.vectorstore = await asyncio.to_thread(
-                        create_vectorstore, chunks, embeddings
+                        create_vectorstore, chunks, embeddings, collection_name
                     )
+                    logger.info(f"新建用户 {owner_user_id} 的向量库，{chunk_count} 块")
                 else:
+                    # 向量库已存在，追加文档
                     await asyncio.to_thread(
                         add_documents_to_vectorstore, user_data.vectorstore, chunks
                     )
+                    logger.info(f"向用户 {owner_user_id} 的向量库追加 {chunk_count} 块")
 
                 retriever = get_retriever(user_data.vectorstore)
                 user_data.qa_chain = create_qa_chain(retriever)
@@ -321,11 +355,13 @@ async def get_status(request: Request, user=Depends(get_current_user), db: Sessi
         # 如果 vectorstore 为 None 但数据库中有文档，自动加载已有的向量库
         if user_data.vectorstore is None:
             from database.crud import get_documents_by_user
+            from rag.embeddings import get_user_collection_name
             user_docs = get_documents_by_user(db, user.id)
             if user_docs:
-                # 尝试加载已有的向量库
+                # 尝试加载已有的向量库（使用用户专属集合）
+                collection_name = get_user_collection_name(user.id)
                 embeddings = get_cached_embeddings()
-                user_data.vectorstore = await asyncio.to_thread(load_vectorstore, embeddings)
+                user_data.vectorstore = await asyncio.to_thread(load_vectorstore, embeddings, collection_name)
                 if user_data.vectorstore:
                     retriever = get_retriever(user_data.vectorstore)
                     user_data.qa_chain = create_qa_chain(retriever)
@@ -423,19 +459,44 @@ async def chat(
         # 如果 vectorstore 为 None，尝试自动加载
         if user_data.vectorstore is None:
             from database.crud import get_documents_by_user
+            from rag.embeddings import get_user_collection_name
             user_docs = get_documents_by_user(db, user.id)
             if user_docs:
+                collection_name = get_user_collection_name(user.id)
                 embeddings = get_cached_embeddings()
-                user_data.vectorstore = await asyncio.to_thread(load_vectorstore, embeddings)
+                user_data.vectorstore = await asyncio.to_thread(load_vectorstore, embeddings, collection_name)
                 if user_data.vectorstore:
                     retriever = get_retriever(user_data.vectorstore)
                     user_data.qa_chain = create_qa_chain(retriever)
+                    logger.info(f"自动加载向量库成功，用户 {user.id} 有 {len(user_docs)} 个文档")
+                else:
+                    logger.warning(f"自动加载向量库失败，用户 {user.id} 有 {len(user_docs)} 个文档但向量库为空")
+            else:
+                logger.info(f"用户 {user.id} 无文档，使用直接对话模式")
+        else:
+            logger.debug(f"用户 {user.id} 向量库已就绪")
 
     # 使用用户的 qa_chain（RAG 模式），否则使用直接对话链
+    model_name = body.model if body.model else None
+
+    # 确定模型显示名称
+    from rag.llm_factory import MODEL_REGISTRY
+    model_display_name = None
+    if model_name and model_name in MODEL_REGISTRY:
+        model_display_name = MODEL_REGISTRY[model_name].display_name
+    elif model_name:
+        model_display_name = model_name
+
     if user_data and user_data.qa_chain:
-        chain = user_data.qa_chain
+        # 如果指定了模型，创建新的 chain（使用现有 retriever）
+        if model_name:
+            from rag.retriever import get_retriever
+            retriever = get_retriever(user_data.vectorstore)
+            chain = create_qa_chain(retriever, model_name=model_name)
+        else:
+            chain = user_data.qa_chain
     else:
-        chain = create_direct_chain()
+        chain = create_direct_chain(model_name=model_name)
 
     if not body.question.strip():
         raise HTTPException(400, detail="请输入有效问题")
@@ -457,13 +518,15 @@ async def chat(
             lines.append(f"{role}: {msg.content}")
         chat_history_str = "\n".join(lines)
 
-    # 如果有临时文件，添加到上下文中
+    # 如果有临时文件，添加到上下文中（仅当前对话的临时文件）
     temp_context = ""
     session_id = request.cookies.get("session_id")
     session = store.get(session_id)
-    if session and session.temp_files:
+    conv_key = body.conversation_id or 0
+    if session and session.temp_files and conv_key in session.temp_files:
+        conv_temps = session.temp_files[conv_key]
         temp_parts = []
-        for temp_id, temp_file in session.temp_files.items():
+        for temp_id, temp_file in conv_temps.items():
             temp_parts.append(f"## 文件: {temp_file.filename}\n{temp_file.content[:10000]}")
         if temp_parts:
             temp_context = "\n\n## 当前会话上传的临时文件\n" + "\n\n".join(temp_parts)
@@ -478,37 +541,84 @@ async def chat(
 
     async def event_generator():
         try:
-            # Run the entire stream in a thread to avoid blocking the event loop
-            def _stream_all():
-                chunks_gen, source_docs = chain.stream(
-                    {
-                        "question": full_question,
-                        "chat_history": chat_history_str,
-                    }
-                )
-                chunks = list(chunks_gen)
-                return chunks, source_docs
+            # 用队列桥接同步生成器到异步流（实时流式）
+            chunk_queue: Queue = Queue()
+            sentinel = object()
 
-            chunks, source_docs = await asyncio.to_thread(_stream_all)
+            def _stream_worker():
+                try:
+                    chunks_gen, source_docs = chain.stream(
+                        {
+                            "question": full_question,
+                            "chat_history": chat_history_str,
+                        }
+                    )
+                    # 先发送 source_docs
+                    chunk_queue.put(("sources", source_docs))
+                    # 逐个发送 token
+                    for chunk in chunks_gen:
+                        chunk_queue.put(("token", chunk))
+                    chunk_queue.put(("done", None))
+                except Exception as e:
+                    chunk_queue.put(("error", str(e)))
+                finally:
+                    chunk_queue.put(sentinel)
 
-            for chunk in chunks:
-                yield f"event: token\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0)
+            # 启动后台线程
+            Thread(target=_stream_worker, daemon=True).start()
 
-            sources = [
-                {
-                    "source": f"{doc.metadata.get('source', '未知来源')} - {doc.metadata.get('page_label', '')}",
-                    "content": doc.page_content[:200],
+            source_docs = []
+            full_answer_parts = []
+
+            # 从队列读取并实时 yield
+            while True:
+                item = await asyncio.to_thread(chunk_queue.get)
+                if item is sentinel:
+                    break
+
+                event_type, data = item
+
+                if event_type == "sources":
+                    source_docs = data
+                elif event_type == "token":
+                    full_answer_parts.append(data)
+                    yield f"event: token\ndata: {json.dumps({'content': data}, ensure_ascii=False)}\n\n"
+                elif event_type == "error":
+                    logger.error(f"聊天流式生成失败: {data}")
+                    yield f"event: error\ndata: {json.dumps({'error': '服务内部错误，请稍后重试'}, ensure_ascii=False)}\n\n"
+                    return
+
+            # 构建结构化的 sources
+            sources = []
+            for doc in source_docs:
+                source_entry = {
+                    "source": doc.metadata.get("source", "未知来源"),
+                    "page": doc.metadata.get("page_label", ""),
+                    "content": doc.page_content[:300],
+                    "score": round(float(doc.metadata.get("relevance_score", 0.0)), 3) if doc.metadata.get("relevance_score") else None,
+                    "chunk_id": doc.metadata.get("chunk_id", ""),
+                    "doc_id": doc.metadata.get("doc_id", ""),
                 }
+                sources.append(source_entry)
+
+            # 计算 RAG 评估指标
+            full_answer = "".join(full_answer_parts)
+            similarity_scores = [
+                doc.metadata.get("relevance_score", 0.0)
                 for doc in source_docs
+                if doc.metadata.get("relevance_score")
             ]
+            evaluation = format_evaluation_for_sse(
+                source_docs,
+                similarity_scores if similarity_scores else None,
+                full_answer,
+            )
 
             # Save assistant message to DB
             if conv_id:
-                full_answer = "".join(chunks)
-                create_message(db, conv_id, "assistant", full_answer, sources if sources else None)
+                create_message(db, conv_id, "assistant", full_answer, sources if sources else None, model_name=model_display_name)
 
-            yield f"event: done\ndata: {json.dumps({'sources': sources}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'sources': sources, 'evaluation': evaluation, 'model_name': model_display_name}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error(f"聊天流式生成失败: {e}")
             yield f"event: error\ndata: {json.dumps({'error': '服务内部错误，请稍后重试'}, ensure_ascii=False)}\n\n"

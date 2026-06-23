@@ -2,6 +2,7 @@ export interface User {
   id: number
   username: string
   email: string
+  avatar_url?: string | null
   created_at?: string
 }
 
@@ -25,7 +26,38 @@ export interface ApiDocumentItem {
 
 export interface Source {
   source: string
+  page?: string
   content: string
+  score?: number | null
+  chunkId?: string
+  docId?: string
+}
+
+export interface ModelInfo {
+  id: string
+  display_name: string
+  provider: string
+  max_tokens: number
+  description: string
+}
+
+export interface RetrievalMetrics {
+  context_precision: number
+  avg_relevance_score: number
+  top_k_scores: number[]
+  total_chunks: number
+}
+
+export interface CitationMetrics {
+  citation_count: number
+  has_source_section: boolean
+  coverage: number
+  available_docs: number
+}
+
+export interface RAGEvaluation {
+  retrieval: RetrievalMetrics
+  citation?: CitationMetrics
 }
 
 export interface Message {
@@ -33,8 +65,10 @@ export interface Message {
   role: 'user' | 'assistant'
   content: string
   sources?: Source[]
+  evaluation?: RAGEvaluation
   isStreaming?: boolean
   timestamp: number
+  model_name?: string
 }
 
 export interface ChatHistoryItem {

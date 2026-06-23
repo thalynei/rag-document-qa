@@ -1,4 +1,4 @@
-import type { UploadTaskResponse, UploadStatusResponse, StatusResponse, Source } from '../types'
+import type { UploadTaskResponse, UploadStatusResponse, StatusResponse, Source, ModelInfo, RAGEvaluation } from '../types'
 
 export interface DocumentDetail {
   id: number
@@ -87,14 +87,31 @@ export async function deleteDocument(docId: string): Promise<void> {
   }
 }
 
+export async function fetchModels(): Promise<ModelInfo[]> {
+  const res = await fetch('/api/models', {
+    headers: getAuthHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(`获取模型列表失败: ${res.status}`)
+  }
+  return res.json()
+}
+
+export interface StreamChatCallbacks {
+  onToken: (content: string) => void
+  onDone: (sources: Source[], evaluation?: RAGEvaluation, model_name?: string) => void
+  onError: (error: string) => void
+}
+
 export async function streamChat(
   question: string,
   chatHistory: { role: string; content: string }[],
-  onToken: (content: string) => void,
-  onDone: (sources: Source[]) => void,
-  onError: (error: string) => void,
+  callbacks: StreamChatCallbacks,
   conversationId?: number,
+  model?: string,
 ): Promise<void> {
+  const { onToken, onDone, onError } = callbacks
+
   let res: Response
   try {
     res = await fetch('/api/chat', {
@@ -107,6 +124,7 @@ export async function streamChat(
         question,
         chat_history: chatHistory,
         conversation_id: conversationId,
+        model: model || undefined,
       }),
     })
   } catch {
@@ -160,7 +178,7 @@ export async function streamChat(
           onToken(data.content)
         } else if (eventType === 'done' && !doneCalled) {
           doneCalled = true
-          onDone(data.sources || [])
+          onDone(data.sources || [], data.evaluation, data.model_name)
         } else if (eventType === 'error') {
           onError(data.error || 'Unknown error')
         }
@@ -219,10 +237,13 @@ export async function fetchDocumentContent(docId: string): Promise<{ filename: s
 
 // ─── Temporary File API ─────────────────────────────────────────────────────
 
-export async function uploadTempFile(file: File): Promise<TempFileResponse> {
+export async function uploadTempFile(file: File, conversationId?: number): Promise<TempFileResponse> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch('/api/upload/temp', {
+  const url = conversationId
+    ? `/api/upload/temp?conversation_id=${conversationId}`
+    : '/api/upload/temp'
+  const res = await fetch(url, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: form,
@@ -242,4 +263,72 @@ export async function fetchTempFileContent(tempId: string): Promise<TempFileCont
     throw new Error(`获取临时文件内容失败: ${res.status}`)
   }
   return res.json()
+}
+
+// ─── Message API ────────────────────────────────────────────────────────────
+
+export async function deleteMessage(conversationId: number, messageId: number): Promise<void> {
+  const res = await fetch(`/api/conversations/${conversationId}/messages/${messageId}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(`删除消息失败: ${res.status}`)
+  }
+}
+
+// ─── User Management API ───────────────────────────────────────────────────
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const res = await fetch('/api/auth/change-password', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '修改密码失败' }))
+    throw new Error(err.detail || '修改密码失败')
+  }
+}
+
+export async function uploadAvatar(file: File): Promise<{ avatar_url: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/auth/avatar', {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: form,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '上传头像失败' }))
+    throw new Error(err.detail || '上传头像失败')
+  }
+  return res.json()
+}
+
+export async function fetchUserSettings(): Promise<{ system_prompt: string }> {
+  const res = await fetch('/api/auth/settings', {
+    headers: getAuthHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(`获取设置失败: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function updateUserSettings(settings: { system_prompt?: string }): Promise<void> {
+  const res = await fetch('/api/auth/settings', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
+    body: JSON.stringify(settings),
+  })
+  if (!res.ok) {
+    throw new Error(`更新设置失败: ${res.status}`)
+  }
 }

@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from 'vue'
-import { Paperclip, FileText, X, ArrowUp, Loader2, Sparkles, Eye } from 'lucide-vue-next'
+import { ref, computed, nextTick, watch, onMounted } from 'vue'
+import { Paperclip, FileText, X, ArrowUp, Loader2, Sparkles, Eye, ChevronDown, Cpu } from 'lucide-vue-next'
 import { useFileUpload } from '../composables/useFileUpload'
+import { useChatStore } from '../stores/chat'
 import FilePreviewModal from './FilePreviewModal.vue'
+
+const chatStore = useChatStore()
 
 const props = defineProps<{
   disabled?: boolean
@@ -35,6 +38,31 @@ const previewLoading = ref(false)
 
 const MIN_HEIGHT = 48
 const MAX_HEIGHT = 160
+
+// 模型选择器
+const showModelDropdown = ref(false)
+const currentModelName = computed(() => {
+  const model = chatStore.availableModels.find(m => m.id === chatStore.selectedModel)
+  return model?.display_name || chatStore.selectedModel || '默认模型'
+})
+
+function selectModel(modelId: string) {
+  chatStore.setSelectedModel(modelId)
+  showModelDropdown.value = false
+}
+
+// 点击外部关闭下拉菜单
+function handleClickOutside(e: Event) {
+  const target = e.target as HTMLElement
+  if (!target.closest('.model-selector')) {
+    showModelDropdown.value = false
+  }
+}
+
+onMounted(() => {
+  chatStore.loadModels()
+  document.addEventListener('click', handleClickOutside)
+})
 
 const canSend = computed(() => {
   return (inputValue.value.trim().length > 0 || selectedFile.value !== null) && !props.disabled
@@ -167,6 +195,33 @@ watch(() => props.disabled, (val) => {
         </button>
       </div>
     </Transition>
+
+    <!-- Model selector -->
+    <div class="model-selector-wrap" v-if="chatStore.availableModels.length > 1">
+      <div class="model-selector" @click.stop="showModelDropdown = !showModelDropdown">
+        <Cpu :size="14" />
+        <span class="model-name">{{ currentModelName }}</span>
+        <ChevronDown :size="14" class="chevron" :class="{ open: showModelDropdown }" />
+      </div>
+
+      <Transition name="dropdown">
+        <div v-if="showModelDropdown" class="model-dropdown">
+          <button
+            v-for="model in chatStore.availableModels"
+            :key="model.id"
+            class="model-option"
+            :class="{ active: model.id === chatStore.selectedModel }"
+            @click.stop="selectModel(model.id)"
+          >
+            <div class="model-option-info">
+              <span class="model-option-name">{{ model.display_name }}</span>
+              <span class="model-option-desc">{{ model.description }}</span>
+            </div>
+            <span class="model-option-provider">{{ model.provider }}</span>
+          </button>
+        </div>
+      </Transition>
+    </div>
 
     <!-- Input container -->
     <div
@@ -452,6 +507,110 @@ watch(() => props.disabled, (val) => {
   opacity: 0.6;
 }
 
+/* Model selector */
+.model-selector-wrap {
+  padding: 0 1.5rem;
+  margin-bottom: 0.5rem;
+  position: relative;
+}
+
+.model-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: 20px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.model-selector:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.model-name {
+  font-weight: 500;
+}
+
+.chevron {
+  transition: transform 0.2s;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+.model-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 1.5rem;
+  margin-bottom: 0.375rem;
+  width: 280px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+  padding: 0.375rem;
+}
+
+.model-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  border-radius: 8px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+  color: var(--color-text);
+}
+
+.model-option:hover {
+  background: var(--color-surface-hover);
+}
+
+.model-option.active {
+  background: var(--color-primary-subtle);
+}
+
+.model-option-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.model-option-name {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.model-option-desc {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+.model-option-provider {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  background: var(--color-bg-tertiary);
+  padding: 0.125rem 0.375rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
 /* Transitions */
 .fade-enter-active,
 .fade-leave-active {
@@ -472,5 +631,16 @@ watch(() => props.disabled, (val) => {
 .slide-up-leave-to {
   opacity: 0;
   transform: translateY(10px);
+}
+
+.dropdown-enter-active,
+.dropdown-leave-active {
+  transition: all 0.2s ease;
+}
+
+.dropdown-enter-from,
+.dropdown-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 </style>

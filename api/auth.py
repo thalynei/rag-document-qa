@@ -1,10 +1,11 @@
 """Authentication routes and JWT utilities."""
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -17,7 +18,7 @@ from database.crud import create_user, get_user_by_email, get_user_by_id, get_us
 logger = logging.getLogger(__name__)
 
 # JWT Configuration
-SECRET_KEY = "rag-qa-secret-key-change-in-production"
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "rag-qa-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
@@ -171,32 +172,34 @@ async def login(body: LoginRequest, request: Request, response: Response, db: Se
 
 
 async def _init_user_session(request: Request, response: Response, user, db: Session):
-    """初始化用户的 session，加载文档和向量库"""
+    """初始化用户的 session，加载文档和向量库到 user_store（用户级别共享数据）"""
     try:
-        from .session import store, DocumentEntry
+        from .session import store, user_store, DocumentEntry
         from database.crud import get_documents_by_user
         from rag.retriever import get_retriever
         from rag.chain import create_qa_chain
         from rag.embeddings import get_embeddings
-        from langchain_community.vectorstores import Chroma
-        from config import CHROMA_PERSIST_DIR
+        from rag.embeddings import load_vectorstore
 
-        # 获取或创建 session
+        # 获取或创建 session（会话级别）
         session_id = request.cookies.get("session_id")
         session, is_new = store.get_or_create(session_id)
         if is_new:
             response.set_cookie("session_id", session.session_id, httponly=True)
+
+        # 获取或创建用户级别共享数据
+        user_data, _ = user_store.get_or_create(user.id)
 
         # 从数据库加载用户的文档
         user_docs = get_documents_by_user(db, user.id)
         logger.info(f"用户 {user.username} 有 {len(user_docs)} 个文档")
 
         # 清空旧的文档列表，重新加载
-        session.documents.clear()
+        user_data.documents.clear()
 
-        # 加载文档信息到 session
+        # 加载文档信息到 user_data
         for doc in user_docs:
-            session.documents[doc.doc_id] = DocumentEntry(
+            user_data.documents[doc.doc_id] = DocumentEntry(
                 doc_id=doc.doc_id,
                 doc_name=doc.filename,
                 page_count=doc.page_count,
@@ -204,33 +207,26 @@ async def _init_user_session(request: Request, response: Response, user, db: Ses
                 doc_summary=doc.summary or "",
             )
 
-        # 尝试加载已有的向量库
+        # 尝试加载已有的向量库（使用用户专属集合）
         try:
+            from rag.embeddings import get_user_collection_name
+            collection_name = get_user_collection_name(user.id)
             embeddings = get_embeddings()
-            vectorstore = Chroma(
-                persist_directory=CHROMA_PERSIST_DIR,
-                embedding_function=embeddings,
-                collection_name="rag_docs",
-            )
+            vectorstore = load_vectorstore(embeddings, collection_name=collection_name)
 
-            # 检查向量库是否有数据
-            collection = vectorstore._collection
-            count = collection.count()
-            logger.info(f"向量库中有 {count} 个向量")
-
-            if count > 0:
-                session.vectorstore = vectorstore
+            if vectorstore:
+                user_data.vectorstore = vectorstore
                 retriever = get_retriever(vectorstore)
-                session.qa_chain = create_qa_chain(retriever)
+                user_data.qa_chain = create_qa_chain(retriever)
                 logger.info(f"已加载用户 {user.username} 的 {len(user_docs)} 个文档和向量库")
             else:
                 logger.warning("向量库为空，无法创建 QA chain")
-                session.vectorstore = None
-                session.qa_chain = None
+                user_data.vectorstore = None
+                user_data.qa_chain = None
         except Exception as e:
             logger.warning(f"加载向量库失败: {e}")
-            session.vectorstore = None
-            session.qa_chain = None
+            user_data.vectorstore = None
+            user_data.qa_chain = None
     except Exception as e:
         logger.warning(f"初始化 session 失败: {e}")
 
@@ -244,4 +240,98 @@ async def get_me(user=Depends(get_current_user)):
 @router.post("/logout")
 async def logout(response: Response):
     response.delete_cookie("access_token")
+    return {"status": "ok"}
+
+
+# ─── Password Change ────────────────────────────────────────────────────────
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password")
+async def change_password(
+    body: ChangePasswordRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if len(body.new_password) < 6:
+        raise HTTPException(400, "新密码长度至少 6 位")
+    if not verify_password(body.current_password, user.hashed_password):
+        raise HTTPException(400, "当前密码错误")
+    from database.crud import update_user_password
+    update_user_password(db, user.id, hash_password(body.new_password))
+    return {"status": "ok", "message": "密码修改成功"}
+
+
+# ─── Avatar Upload ──────────────────────────────────────────────────────────
+
+@router.post("/avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    import os
+    from pathlib import Path
+
+    # 验证文件类型
+    allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(400, "仅支持 JPG/PNG/WebP/GIF 格式")
+
+    # 验证文件大小（最大 2MB）
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(400, "头像文件大小不能超过 2MB")
+
+    # 保存文件
+    avatars_dir = Path(__file__).parent.parent / "uploads" / "avatars"
+    avatars_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = os.path.splitext(file.filename or ".jpg")[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        ext = ".jpg"
+    filename = f"{user.id}{ext}"
+    file_path = avatars_dir / filename
+
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # 更新数据库
+    from database.crud import update_user_avatar
+    update_user_avatar(db, user.id, filename)
+
+    return {
+        "status": "ok",
+        "avatar_url": f"/uploads/avatars/{filename}",
+    }
+
+
+# ─── User Settings ──────────────────────────────────────────────────────────
+
+@router.get("/settings")
+async def get_settings(
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from database.crud import get_or_create_user_settings
+    settings = get_or_create_user_settings(db, user.id)
+    return {"system_prompt": settings.system_prompt or ""}
+
+
+class UpdateSettingsRequest(BaseModel):
+    system_prompt: str | None = None
+
+
+@router.put("/settings")
+async def update_settings(
+    body: UpdateSettingsRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from database.crud import update_system_prompt
+    if body.system_prompt is not None:
+        update_system_prompt(db, user.id, body.system_prompt)
     return {"status": "ok"}

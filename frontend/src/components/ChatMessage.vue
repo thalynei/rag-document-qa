@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Bot, Copy, RefreshCw, Quote, ChevronDown, User } from 'lucide-vue-next'
+import { Bot, Copy, RefreshCw, Quote, ChevronDown, User, Trash2 } from 'lucide-vue-next'
 import type { Message } from '../types'
 import SourceCard from './SourceCard.vue'
+import EvaluationPanel from './EvaluationPanel.vue'
 import { useMarkdown } from '../composables/useMarkdown'
 import { useChatStore } from '../stores/chat'
 import { useToastStore } from '../stores/toast'
@@ -33,6 +34,10 @@ function copyMessage() {
 function regenerate() {
   store.regenerateMessage(props.index)
 }
+
+function deleteMsg() {
+  store.deleteMessage(props.index)
+}
 </script>
 
 <template>
@@ -41,6 +46,14 @@ function regenerate() {
     <template v-if="message.role === 'user'">
       <div class="user-bubble">
         <p>{{ message.content }}</p>
+        <div class="user-actions">
+          <button @click="copyMessage" class="action-btn">
+            <Copy :size="12" />
+          </button>
+          <button @click="deleteMsg" class="action-btn action-btn-danger">
+            <Trash2 :size="12" />
+          </button>
+        </div>
       </div>
       <div class="avatar user-avatar">
         <User :size="18" />
@@ -54,7 +67,7 @@ function regenerate() {
       </div>
       <div class="ai-content">
         <div class="ai-header">
-          <span class="ai-name">AI 助手</span>
+          <span class="ai-name">{{ message.model_name || 'AI 助手' }}</span>
           <span class="ai-time">{{ timeStr }}</span>
         </div>
 
@@ -82,7 +95,17 @@ function regenerate() {
             <RefreshCw :size="14" />
             <span>重新生成</span>
           </button>
+          <button @click="deleteMsg" class="action-btn action-btn-danger">
+            <Trash2 :size="14" />
+            <span>删除</span>
+          </button>
         </div>
+
+        <!-- Evaluation Panel -->
+        <EvaluationPanel
+          v-if="message.evaluation && !message.isStreaming"
+          :evaluation="message.evaluation"
+        />
 
         <!-- Sources -->
         <template v-if="message.sources && message.sources.length > 0 && !message.isStreaming">
@@ -98,6 +121,9 @@ function regenerate() {
                 :key="i"
                 :source="src.source"
                 :content="src.content"
+                :page="src.page"
+                :score="src.score"
+                :index="i"
               />
             </div>
           </details>
@@ -160,6 +186,18 @@ function regenerate() {
   line-height: 1.6;
   white-space: pre-wrap;
   color: var(--color-text);
+}
+
+.user-actions {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.user-bubble:hover .user-actions {
+  opacity: 1;
 }
 
 /* AI Content */
@@ -248,6 +286,11 @@ function regenerate() {
 .action-btn:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
+}
+
+.action-btn-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
 }
 
 /* Sources */

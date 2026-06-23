@@ -39,6 +39,13 @@ app.include_router(auth_router)
 app.include_router(conv_router)
 app.include_router(router, prefix="/api")
 
+# 静态文件服务：上传文件（头像等）
+uploads_dir = Path(__file__).parent.parent / "uploads"
+uploads_dir.mkdir(exist_ok=True)
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 if frontend_dist.exists():
     from fastapi.staticfiles import StaticFiles

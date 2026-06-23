@@ -30,8 +30,35 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db() -> None:
-    """Create all tables."""
+    """Create all tables and migrate existing schema."""
     Base.metadata.create_all(bind=engine)
+
+    # 迁移：为已有表添加新列（SQLite 不支持 IF NOT EXISTS，用 try/except）
+    _migrate_schema()
+
+
+def _migrate_schema() -> None:
+    """为已有数据库添加新列（幂等操作）"""
+    import logging
+    from sqlalchemy import text
+
+    logger = logging.getLogger(__name__)
+
+    migrations = [
+        # (table, column, column_definition)
+        ("users", "avatar_path", "ALTER TABLE users ADD COLUMN avatar_path VARCHAR(500)"),
+        ("messages", "model_name", "ALTER TABLE messages ADD COLUMN model_name VARCHAR(100)"),
+    ]
+
+    with engine.connect() as conn:
+        for table, column, ddl in migrations:
+            try:
+                conn.execute(text(ddl))
+                conn.commit()
+                logger.info(f"迁移: {table}.{column} 列已添加")
+            except Exception:
+                # 列已存在，忽略
+                conn.rollback()
 
 
 def get_db() -> Generator[Session, None, None]:
